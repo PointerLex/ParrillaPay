@@ -7,46 +7,142 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum EventStatus {
+  OPEN
+  CLOSED
+}
+
+enum PaymentStatus {
+  PENDING
+  REVIEW
+  PAID
+  REJECTED
+}
+
+enum ReceiptType {
+  EXPENSE
+  PAYMENT
+}
+
 model User {
-  id           Int       @id @default(autoincrement())
-  name         String
-  email        String?   @unique
-  createdAt    DateTime  @default(now())
-  events       Event[]   @relation("EventParticipants")
-  paidExpenses Expense[]
-  debtsOwed    Debt[]    @relation("Debtor")
-  debtsDue     Debt[]    @relation("Creditor")
+  id              Int            @id @default(autoincrement())
+  name            String
+  email           String         @unique
+  passwordHash    String
+  createdAt       DateTime       @default(now())
+  memberships     EventMember[]
+  createdEvents   Event[]        @relation("EventCreator")
+  expenses        Expense[]      @relation("ExpensePayer")
+  debtsOwed       Debt[]         @relation("Debtor")
+  debtsDue        Debt[]         @relation("Creditor")
+  paymentProofs   PaymentProof[]
 }
 
 model Event {
-  id           Int       @id @default(autoincrement())
+  id           Int           @id @default(autoincrement())
   name         String
-  createdAt    DateTime  @default(now())
-  participants User[]    @relation("EventParticipants")
+  inviteCode   String        @unique @default(cuid())
+  date         DateTime?
+  status       EventStatus   @default(OPEN)
+  bankName     String?
+  accountName  String?
+  accountNumber String?
+  taxId        String?
+  createdAt    DateTime      @default(now())
+  creatorId    Int
+  creator      User          @relation("EventCreator", fields: [creatorId], references: [id])
+  members      EventMember[]
   expenses     Expense[]
   debts        Debt[]
+  proofs       PaymentProof[]
+}
+
+model EventMember {
+  id            Int      @id @default(autoincrement())
+  eventId       Int
+  userId        Int
+  joinedAt      DateTime @default(now())
+  preferences   String[] @default([])
+  event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shares        ItemShare[]
+  expenseShares ExpenseShare[]
+
+  @@unique([eventId, userId])
 }
 
 model Expense {
-  id          Int      @id @default(autoincrement())
+  id          Int          @id @default(autoincrement())
   description String
-  amount      Decimal  @db.Decimal(10, 2)
+  amount      Decimal      @db.Decimal(10, 2)
   receiptUrl  String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime     @default(now())
   eventId     Int
-  event       Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
   paidById    Int
-  paidBy      User     @relation(fields: [paidById], references: [id])
+  paidBy      User         @relation("ExpensePayer", fields: [paidById], references: [id])
+  items       ExpenseItem[]
+  shares      ExpenseShare[]
+}
+
+model ExpenseShare {
+  id          Int         @id @default(autoincrement())
+  amount      Decimal     @db.Decimal(10, 2)
+  expenseId   Int
+  expense     Expense    @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  memberId    Int
+  member      EventMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, memberId])
+}
+
+model ExpenseItem {
+  id          Int        @id @default(autoincrement())
+  name        String
+  amount      Decimal    @db.Decimal(10, 2)
+  category    String?
+  expenseId   Int
+  expense     Expense    @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  shares      ItemShare[]
+}
+
+model ItemShare {
+  id            Int         @id @default(autoincrement())
+  itemId        Int
+  memberId      Int
+  item          ExpenseItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  member        EventMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, memberId])
 }
 
 model Debt {
-  id         Int      @id @default(autoincrement())
-  amount     Decimal  @db.Decimal(10, 2)
-  settled    Boolean  @default(false)
+  id         Int           @id @default(autoincrement())
+  amount     Decimal       @db.Decimal(10, 2)
+  status     PaymentStatus @default(PENDING)
   eventId    Int
-  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event      Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
   debtorId   Int
-  debtor     User     @relation("Debtor", fields: [debtorId], references: [id])
+  debtor     User          @relation("Debtor", fields: [debtorId], references: [id])
   creditorId Int
-  creditor   User     @relation("Creditor", fields: [creditorId], references: [id])
+  creditor   User          @relation("Creditor", fields: [creditorId], references: [id])
+  proofs     PaymentProof[]
+}
+
+model PaymentProof {
+  id          Int           @id @default(autoincrement())
+  type        ReceiptType
+  status      PaymentStatus @default(REVIEW)
+  filename    String
+  mimeType    String
+  fileData    Bytes
+  extracted   Json?
+  reviewNote  String?
+  createdAt   DateTime      @default(now())
+  eventId     Int
+  event       Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  uploadedById Int
+  uploadedBy  User          @relation(fields: [uploadedById], references: [id])
+  debtId      Int?
+  debt        Debt?         @relation(fields: [debtId], references: [id], onDelete: SetNull)
 }
