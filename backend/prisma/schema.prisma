@@ -83,6 +83,7 @@ model Expense {
   paidBy      User         @relation("ExpensePayer", fields: [paidById], references: [id])
   items       ExpenseItem[]
   shares      ExpenseShare[]
+  proofs      PaymentProof[]
 }
 
 model ExpenseShare {
@@ -143,6 +144,8 @@ model PaymentProof {
   event       Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
   uploadedById Int
   uploadedBy  User          @relation(fields: [uploadedById], references: [id])
+  expenseId   Int?
+  expense     Expense?      @relation(fields: [expenseId], references: [id], onDelete: SetNull)
   debtId      Int?
   debt        Debt?         @relation(fields: [debtId], references: [id], onDelete: SetNull)
 }

@@ -34,10 +34,11 @@ function authenticate(req, res, next) {
     return res.status(401).json({ error: "Inicia sesión para continuar." });
   }
 
-  const [payload, signature] = token.split(".");
-  if (!payload || !signature) {
+  const parts = token.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
     return res.status(401).json({ error: "Sesión inválida." });
   }
+  const [payload, signature] = parts;
   const expected = crypto.createHmac("sha256", tokenSecret).update(payload).digest();
   let actual;
   try {

@@ -44,7 +44,7 @@ async function extractWithClaude(file, type) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest",
+      model: process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001",
       max_tokens: 1200,
       system: "Extrae datos visibles del comprobante. Devuelve solo JSON válido, no inventes datos y usa null si no es legible.",
       messages: [{
@@ -113,10 +113,16 @@ router.post("/", authenticate, upload.single("receipt"), async (req, res) => {
   if (type === "PAYMENT" && extracted && debt) {
     const event = await prisma.event.findUnique({ where: { id: eventId } });
     const normalize = (value) => typeof value === "string" ? value.trim().toLocaleLowerCase() : "";
-    const expectedRecipient = normalize(event.accountName || debt.creditor.name);
+    const normalizeAccount = (value) => typeof value === "string" ? value.replace(/[^a-z0-9]/gi, "").toLocaleLowerCase() : "";
+    const transferDate = typeof extracted.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(extracted.date)
+      ? Date.parse(`${extracted.date}T00:00:00Z`)
+      : NaN;
     verified = Number(extracted.amount) === Number(debt.amount) &&
       normalize(extracted.senderName) === normalize(debt.debtor.name) &&
-      normalize(extracted.recipientName) === expectedRecipient;
+      Boolean(event.accountName && event.accountNumber) &&
+      normalize(extracted.recipientName) === normalize(event.accountName) &&
+      normalizeAccount(extracted.recipientAccount) === normalizeAccount(event.accountNumber) &&
+      Number.isFinite(transferDate) && transferDate <= Date.now();
     if (verified) {
       proofStatus = "PAID";
       reviewNote = null;

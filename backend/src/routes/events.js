@@ -1,27 +1,30 @@
 const express = require("express");
 const prisma = require("../db");
 const { authenticate, requireEventMember } = require("../auth");
+const { allocateCents, settleBalances } = require("../finance");
 
 const router = express.Router();
 router.use(authenticate);
 
 const moneyToCents = (value) => Math.round(Number(value) * 100);
 const centsToMoney = (cents) => (cents / 100).toFixed(2);
-const validAmount = (value) => Number.isFinite(Number(value)) && Number(value) > 0 && Number(value) <= 10000000;
+const validAmount = (value) => Number.isFinite(Number(value)) && moneyToCents(value) > 0 && Number(value) <= 10000000;
 
 async function rebuildDebts(tx, eventId) {
   const expenses = await tx.expense.findMany({
     where: { eventId },
     include: { shares: true },
   });
+  const members = await tx.eventMember.findMany({ where: { eventId }, select: { id: true, userId: true } });
+  const userIdByMemberId = new Map(members.map((member) => [member.id, member.userId]));
   const paidDebts = await tx.debt.findMany({ where: { eventId, status: "PAID" } });
   const balances = new Map();
   const adjust = (userId, cents) => balances.set(userId, (balances.get(userId) || 0) + cents);
   for (const expense of expenses) {
     adjust(expense.paidById, moneyToCents(expense.amount));
     for (const share of expense.shares) {
-      const member = await tx.eventMember.findUnique({ where: { id: share.memberId }, select: { userId: true } });
-      if (member) adjust(member.userId, -moneyToCents(share.amount));
+      const userId = userIdByMemberId.get(share.memberId);
+      if (userId) adjust(userId, -moneyToCents(share.amount));
     }
   }
   for (const debt of paidDebts) {
@@ -30,23 +33,15 @@ async function rebuildDebts(tx, eventId) {
   }
 
   await tx.debt.deleteMany({ where: { eventId, status: { in: ["PENDING", "REVIEW", "REJECTED"] } } });
-  const debtors = [...balances].filter(([, amount]) => amount < 0).map(([userId, amount]) => ({ userId, amount: -amount }));
-  const creditors = [...balances].filter(([, amount]) => amount > 0).map(([userId, amount]) => ({ userId, amount }));
-  for (const debtor of debtors) {
-    for (const creditor of creditors) {
-      if (debtor.amount === 0 || creditor.amount === 0 || debtor.userId === creditor.userId) continue;
-      const cents = Math.min(debtor.amount, creditor.amount);
-      await tx.debt.create({
-        data: {
-          amount: centsToMoney(cents),
-          eventId,
-          debtorId: debtor.userId,
-          creditorId: creditor.userId,
-        },
-      });
-      debtor.amount -= cents;
-      creditor.amount -= cents;
-    }
+  for (const settlement of settleBalances(balances)) {
+    await tx.debt.create({
+      data: {
+        amount: centsToMoney(settlement.cents),
+        eventId,
+        debtorId: settlement.debtorId,
+        creditorId: settlement.creditorId,
+      },
+    });
   }
 }
 
@@ -79,6 +74,7 @@ router.post("/", async (req, res) => {
   if (typeof name !== "string" || !name.trim() || name.trim().length > 100) {
     return res.status(400).json({ error: "Escribe un nombre de junta válido." });
   }
+  if (date && Number.isNaN(Date.parse(date))) return res.status(400).json({ error: "La fecha de la junta no es válida." });
   const event = await prisma.event.create({
     data: {
       name: name.trim(),
@@ -163,7 +159,7 @@ router.patch("/:id/preferences", requireEventMember, async (req, res) => {
 });
 
 router.post("/:id/expenses", requireEventMember, async (req, res) => {
-  const { description, amount, items, participantIds } = req.body || {};
+  const { description, amount, items, participantIds, receiptId } = req.body || {};
   if (typeof description !== "string" || !description.trim() || description.trim().length > 150 || !validAmount(amount)) {
     return res.status(400).json({ error: "Descripción y monto válidos son obligatorios." });
   }
@@ -190,14 +186,16 @@ router.post("/:id/expenses", requireEventMember, async (req, res) => {
   }
 
   const sharesByUser = new Map();
-  const shareItemCents = (cents, userIds) => {
-    if (!userIds.length) throw new Error("No hay participantes para dividir este producto.");
-    const base = Math.floor(cents / userIds.length);
-    let remainder = cents - base * userIds.length;
-    for (const userId of userIds) {
-      sharesByUser.set(userId, (sharesByUser.get(userId) || 0) + base + (remainder-- > 0 ? 1 : 0));
+  const distributeCents = (cents, userIds) => {
+    const allocations = allocateCents(cents, userIds);
+    const distributions = [];
+    for (const allocation of allocations) {
+      sharesByUser.set(allocation.userId, (sharesByUser.get(allocation.userId) || 0) + allocation.cents);
+      distributions.push({ memberId: members.get(allocation.userId).id, amount: allocation.cents });
     }
+    return distributions;
   };
+  const itemDistributions = [];
   try {
     if (itemInputs.length) {
       for (const item of itemInputs) {
@@ -210,16 +208,33 @@ router.post("/:id/expenses", requireEventMember, async (req, res) => {
         const category = typeof item.category === "string" ? item.category.toLowerCase() : "";
         ids = ids.filter((id) => !members.get(id).preferences.some((preference) =>
           category && preference.toLowerCase() === category));
-        shareItemCents(moneyToCents(item.amount), ids);
+        itemDistributions.push(distributeCents(moneyToCents(item.amount), ids));
       }
     } else {
-      shareItemCents(totalCents, selected);
+      distributeCents(totalCents, selected);
     }
   } catch {
     return res.status(400).json({ error: "Cada gasto debe poder dividirse entre al menos una persona." });
   }
 
   const expense = await prisma.$transaction(async (tx) => {
+    if (receiptId !== undefined && receiptId !== null) {
+      const receipt = await tx.paymentProof.findFirst({
+        where: {
+          id: Number(receiptId),
+          eventId: req.eventId,
+          uploadedById: req.userId,
+          type: "EXPENSE",
+          status: "REVIEW",
+          expenseId: null,
+        },
+      });
+      if (!receipt) {
+        const error = new Error("No se encontró la boleta pendiente asociada.");
+        error.status = 409;
+        throw error;
+      }
+    }
     const created = await tx.expense.create({
       data: {
         description: description.trim(),
@@ -227,19 +242,26 @@ router.post("/:id/expenses", requireEventMember, async (req, res) => {
         eventId: req.eventId,
         paidById: req.userId,
         items: itemInputs.length ? {
-          create: itemInputs.map((item) => ({
+          create: itemInputs.map((item, index) => ({
             name: item.name.trim(),
             amount: centsToMoney(moneyToCents(item.amount)),
             category: typeof item.category === "string" ? item.category.trim() : undefined,
+            shares: { create: itemDistributions[index].map(({ memberId }) => ({ memberId })) },
           })),
         } : undefined,
         shares: { create: [...sharesByUser].map(([userId, cents]) => ({
           memberId: members.get(userId).id,
           amount: centsToMoney(cents),
         })) },
+        proofs: receiptId !== undefined && receiptId !== null
+          ? { connect: { id: Number(receiptId) } }
+          : undefined,
       },
       include: { paidBy: { select: { id: true, name: true } }, items: true },
     });
+    if (receiptId !== undefined && receiptId !== null) {
+      await tx.paymentProof.update({ where: { id: Number(receiptId) }, data: { status: "PAID" } });
+    }
     await rebuildDebts(tx, req.eventId);
     return created;
   });
@@ -261,6 +283,23 @@ router.post("/:id/debts/:debtId/confirm", requireEventMember, async (req, res) =
     await rebuildDebts(tx, req.eventId);
   });
   res.json({ status: "PAID" });
+});
+
+router.post("/:id/debts/:debtId/reject", requireEventMember, async (req, res) => {
+  const debtId = Number(req.params.debtId);
+  const debt = await prisma.debt.findFirst({ where: { id: debtId, eventId: req.eventId } });
+  if (!debt) return res.status(404).json({ error: "No se encontró el pago." });
+  const event = await prisma.event.findUnique({ where: { id: req.eventId } });
+  if (event.creatorId !== req.userId && debt.creditorId !== req.userId) {
+    return res.status(403).json({ error: "Solo el anfitrión o destinatario puede rechazar el pago." });
+  }
+  if (debt.status !== "REVIEW") return res.status(409).json({ error: "Este pago no está pendiente de revisión." });
+  await prisma.$transaction(async (tx) => {
+    await tx.paymentProof.updateMany({ where: { debtId, status: "REVIEW" }, data: { status: "REJECTED" } });
+    await tx.debt.delete({ where: { id: debtId } });
+    await rebuildDebts(tx, req.eventId);
+  });
+  res.json({ status: "REJECTED" });
 });
 
 module.exports = router;
