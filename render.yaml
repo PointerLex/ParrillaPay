@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: parrillapay-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci --include=dev && npx prisma generate
+    startCommand: npm run prisma:migrate && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: parrillapay-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FRONTEND_URL
+        value: https://parrillapay-frontend.onrender.com
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-4-5-20251001
+  - type: web
+    name: parrillapay-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: https://parrillapay-api.onrender.com
+
+databases:
+  - name: parrillapay-db
+    databaseName: parrillapay
+    user: parrillapay
+    plan: free
+    postgresMajorVersion: "16"

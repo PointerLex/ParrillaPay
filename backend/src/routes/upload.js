@@ -57,7 +57,7 @@ async function extractWithClaude(file, type) {
           {
             type: "text",
             text: type === "PAYMENT"
-              ? 'Devuelve JSON con amount (número), senderName, recipientName, recipientAccount, date (YYYY-MM-DD) y currency.'
+              ? 'Devuelve JSON con amount (número), senderName, senderTaxId, recipientName, recipientAccount, date (YYYY-MM-DD) y currency.'
               : 'Devuelve JSON con items (arreglo de {name, amount, category}), total (número) y date (YYYY-MM-DD).',
           },
         ],
@@ -93,7 +93,7 @@ router.post("/", authenticate, upload.single("receipt"), async (req, res) => {
         status: "PENDING",
       },
       include: {
-        debtor: { select: { name: true } },
+        debtor: { select: { name: true, taxId: true } },
         creditor: { select: { name: true } },
       },
     });
@@ -118,7 +118,10 @@ router.post("/", authenticate, upload.single("receipt"), async (req, res) => {
       ? Date.parse(`${extracted.date}T00:00:00Z`)
       : NaN;
     verified = Number(extracted.amount) === Number(debt.amount) &&
+      typeof extracted.currency === "string" && extracted.currency.toUpperCase() === event.currency &&
       normalize(extracted.senderName) === normalize(debt.debtor.name) &&
+      Boolean(debt.debtor.taxId) &&
+      normalizeAccount(extracted.senderTaxId) === normalizeAccount(debt.debtor.taxId) &&
       Boolean(event.accountName && event.accountNumber) &&
       normalize(extracted.recipientName) === normalize(event.accountName) &&
       normalizeAccount(extracted.recipientAccount) === normalizeAccount(event.accountNumber) &&
@@ -132,6 +135,17 @@ router.post("/", authenticate, upload.single("receipt"), async (req, res) => {
   }
 
   const proof = await prisma.$transaction(async (tx) => {
+    if (debt) {
+      const updated = await tx.debt.updateMany({
+        where: { id: debt.id, status: "PENDING" },
+        data: { status: proofStatus },
+      });
+      if (updated.count !== 1) {
+        const error = new Error("Esta deuda ya tiene un comprobante en revisión.");
+        error.status = 409;
+        throw error;
+      }
+    }
     const created = await tx.paymentProof.create({
       data: {
         type,
@@ -147,11 +161,6 @@ router.post("/", authenticate, upload.single("receipt"), async (req, res) => {
       },
       select: { id: true, type: true, status: true, extracted: true, reviewNote: true, createdAt: true },
     });
-    if (verified && debt) {
-      await tx.debt.update({ where: { id: debt.id }, data: { status: "PAID" } });
-    } else if (debt) {
-      await tx.debt.update({ where: { id: debt.id }, data: { status: "REVIEW" } });
-    }
     return created;
   });
 

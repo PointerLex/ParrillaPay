@@ -13,7 +13,7 @@ async function apiRequest(path, token, options = {}) {
     ...options,
     headers: {
       ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-      Authorization: `******,
+      Authorization: "Bearer " + token,
       ...options.headers,
     },
   });
@@ -222,6 +222,9 @@ export default function EventDashboard({ id }) {
                     </div>
                   )}
                   {debt.status === "REVIEW" && debt.debtorId === user?.id && <p className="mt-3 text-xs text-zinc-500">Comprobante enviado · esperando confirmación</p>}
+                  {debt.proofs?.map((proof) => (
+                    <ProofPreview key={proof.id} proof={proof} eventId={id} token={token} />
+                  ))}
                 </article>
               ))}
             </div>
@@ -318,6 +321,39 @@ export default function EventDashboard({ id }) {
         </div>
       )}
     </main>
+  );
+}
+
+function ProofPreview({ proof, eventId, token }) {
+  const [imageUrl, setImageUrl] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => () => {
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
+  }, [imageUrl]);
+  async function toggleImage() {
+    if (imageUrl) {
+      URL.revokeObjectURL(imageUrl);
+      setImageUrl("");
+      return;
+    }
+    try {
+      const response = await fetch(`${API}/api/events/${eventId}/proofs/${proof.id}/image`, {
+        headers: { Authorization: "Bearer " + token },
+      });
+      if (!response.ok) throw new Error("No se pudo cargar la imagen.");
+      setImageUrl(URL.createObjectURL(await response.blob()));
+      setError("");
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+  return (
+    <div className="mt-3 border-t border-zinc-800 pt-3">
+      <button onClick={toggleImage} className="text-sm text-zinc-300">{imageUrl ? "Ocultar comprobante" : "Ver comprobante"}</button>
+      {proof.reviewNote && <p className="mt-1 text-xs text-zinc-500">{proof.reviewNote}</p>}
+      {error && <p role="alert" className="mt-1 text-xs text-zinc-400">{error}</p>}
+      {imageUrl && <img src={imageUrl} alt={`Comprobante de ${proof.filename}`} className="mt-3 max-h-80 w-full rounded-xl object-contain" />}
+    </div>
   );
 }
 

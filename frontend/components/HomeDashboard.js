@@ -11,7 +11,7 @@ async function request(path, token, options = {}) {
     ...options,
     headers: {
       ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `****** } : {}),
+      ...(token ? { Authorization: "Bearer " + token } : {}),
       ...options.headers,
     },
   });
@@ -25,7 +25,7 @@ export default function HomeDashboard() {
   const [user, setUser] = useState(null);
   const [events, setEvents] = useState([]);
   const [mode, setMode] = useState("login");
-  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [form, setForm] = useState({ name: "", email: "", taxId: "", password: "" });
   const [eventName, setEventName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -116,10 +116,16 @@ export default function HomeDashboard() {
         </div>
         <form onSubmit={submitAuth} className="space-y-4">
           {mode === "register" && (
-            <label className="block text-sm text-zinc-400">
-              Nombre
-              <input required maxLength={80} autoComplete="name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-zinc-500" />
-            </label>
+            <>
+              <label className="block text-sm text-zinc-400">
+                Nombre
+                <input required maxLength={80} autoComplete="name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-zinc-500" />
+              </label>
+              <label className="block text-sm text-zinc-400">
+                RUT <span>(opcional; permite validar transferencias automáticamente)</span>
+                <input maxLength={20} autoComplete="off" value={form.taxId} onChange={(event) => setForm({ ...form, taxId: event.target.value })} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-white outline-none focus:border-zinc-500" />
+              </label>
+            </>
           )}
           <label className="block text-sm text-zinc-400">
             Correo

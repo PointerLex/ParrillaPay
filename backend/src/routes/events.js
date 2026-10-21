@@ -18,6 +18,9 @@ async function rebuildDebts(tx, eventId) {
   const members = await tx.eventMember.findMany({ where: { eventId }, select: { id: true, userId: true } });
   const userIdByMemberId = new Map(members.map((member) => [member.id, member.userId]));
   const paidDebts = await tx.debt.findMany({ where: { eventId, status: "PAID" } });
+  const priorDebts = await tx.debt.findMany({
+    where: { eventId, status: { in: ["PENDING", "REVIEW"] } },
+  });
   const balances = new Map();
   const adjust = (userId, cents) => balances.set(userId, (balances.get(userId) || 0) + cents);
   for (const expense of expenses) {
@@ -32,16 +35,49 @@ async function rebuildDebts(tx, eventId) {
     adjust(debt.creditorId, moneyToCents(debt.amount));
   }
 
-  await tx.debt.deleteMany({ where: { eventId, status: { in: ["PENDING", "REVIEW", "REJECTED"] } } });
+  const priorByPair = new Map(priorDebts.map((debt) => [`${debt.debtorId}:${debt.creditorId}`, debt]));
+  const activePairs = new Set();
   for (const settlement of settleBalances(balances)) {
-    await tx.debt.create({
-      data: {
-        amount: centsToMoney(settlement.cents),
-        eventId,
-        debtorId: settlement.debtorId,
-        creditorId: settlement.creditorId,
-      },
-    });
+    const pair = `${settlement.debtorId}:${settlement.creditorId}`;
+    activePairs.add(pair);
+    const prior = priorByPair.get(pair);
+    if (prior) {
+      if (prior.status === "REVIEW" && moneyToCents(prior.amount) !== settlement.cents) {
+        await tx.paymentProof.updateMany({
+          where: { debtId: prior.id, status: "REVIEW" },
+          data: { status: "REJECTED", reviewNote: "La deuda cambió; solicita un comprobante actualizado." },
+        });
+      }
+      await tx.debt.update({
+        where: { id: prior.id },
+        data: {
+          amount: centsToMoney(settlement.cents),
+          ...(prior.status === "REVIEW" && moneyToCents(prior.amount) !== settlement.cents
+            ? { status: "PENDING" }
+            : {}),
+        },
+      });
+    } else {
+      await tx.debt.create({
+        data: {
+          amount: centsToMoney(settlement.cents),
+          eventId,
+          debtorId: settlement.debtorId,
+          creditorId: settlement.creditorId,
+        },
+      });
+    }
+  }
+  for (const prior of priorDebts) {
+    if (!activePairs.has(`${prior.debtorId}:${prior.creditorId}`)) {
+      if (prior.status === "REVIEW") {
+        await tx.paymentProof.updateMany({
+          where: { debtId: prior.id, status: "REVIEW" },
+          data: { status: "REJECTED", reviewNote: "La deuda ya no está pendiente." },
+        });
+      }
+      await tx.debt.delete({ where: { id: prior.id } });
+    }
   }
 }
 
@@ -74,7 +110,14 @@ router.post("/", async (req, res) => {
   if (typeof name !== "string" || !name.trim() || name.trim().length > 100) {
     return res.status(400).json({ error: "Escribe un nombre de junta válido." });
   }
-  if (date && Number.isNaN(Date.parse(date))) return res.status(400).json({ error: "La fecha de la junta no es válida." });
+  if (date && (typeof date !== "string" || Number.isNaN(Date.parse(date)))) {
+    return res.status(400).json({ error: "La fecha de la junta no es válida." });
+  }
+  for (const value of [bankName, accountName, accountNumber, taxId]) {
+    if (value !== undefined && (typeof value !== "string" || value.length > 120)) {
+      return res.status(400).json({ error: "Los datos bancarios exceden el largo permitido." });
+    }
+  }
   const event = await prisma.event.create({
     data: {
       name: name.trim(),
@@ -121,6 +164,10 @@ router.get("/:id", requireEventMember, async (req, res) => {
         include: {
           debtor: { select: { id: true, name: true } },
           creditor: { select: { id: true, name: true } },
+          proofs: {
+            where: { status: "REVIEW" },
+            select: { id: true, filename: true, uploadedById: true, reviewNote: true, createdAt: true },
+          },
         },
         orderBy: { id: "asc" },
       },
@@ -133,12 +180,48 @@ router.get("/:id", requireEventMember, async (req, res) => {
   });
 });
 
+router.get("/:id/proofs/:proofId/image", requireEventMember, async (req, res) => {
+  const proofId = Number(req.params.proofId);
+  if (!Number.isSafeInteger(proofId) || proofId < 1) return res.status(400).json({ error: "Comprobante inválido." });
+  const proof = await prisma.paymentProof.findFirst({
+    where: { id: proofId, eventId: req.eventId },
+    include: { debt: true, event: { select: { creatorId: true } } },
+  });
+  if (!proof) return res.status(404).json({ error: "No se encontró el comprobante." });
+  if (proof.uploadedById !== req.userId && proof.event.creatorId !== req.userId &&
+      proof.debt?.creditorId !== req.userId) {
+    return res.status(403).json({ error: "No tienes permiso para ver este comprobante." });
+  }
+  res.set({
+    "Content-Disposition": "inline",
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+  }).type(proof.mimeType).send(proof.fileData);
+});
+
 router.patch("/:id", requireEventMember, async (req, res) => {
   const event = await prisma.event.findUnique({ where: { id: req.eventId } });
   if (event.creatorId !== req.userId) return res.status(403).json({ error: "Solo el anfitrión puede editar la junta." });
   const data = {};
+  if (typeof req.body?.name === "string") {
+    if (!req.body.name.trim() || req.body.name.trim().length > 100) {
+      return res.status(400).json({ error: "El nombre de la junta no es válido." });
+    }
+    data.name = req.body.name.trim();
+  }
+  if (req.body?.date !== undefined) {
+    if (req.body.date && (typeof req.body.date !== "string" || Number.isNaN(Date.parse(req.body.date)))) {
+      return res.status(400).json({ error: "La fecha de la junta no es válida." });
+    }
+    data.date = req.body.date ? new Date(req.body.date) : null;
+  }
   for (const field of ["bankName", "accountName", "accountNumber", "taxId"]) {
-    if (typeof req.body?.[field] === "string") data[field] = req.body[field].trim();
+    if (req.body?.[field] !== undefined) {
+      if (typeof req.body[field] !== "string" || req.body[field].length > 120) {
+        return res.status(400).json({ error: "Los datos bancarios exceden el largo permitido." });
+      }
+      data[field] = req.body[field].trim();
+    }
   }
   if (req.body?.status === "CLOSED" || req.body?.status === "OPEN") data.status = req.body.status;
   const updated = await prisma.event.update({ where: { id: req.eventId }, data });
@@ -172,6 +255,7 @@ router.post("/:id/expenses", requireEventMember, async (req, res) => {
   const selected = Array.isArray(participantIds) && participantIds.length
     ? [...new Set(participantIds.map(Number))]
     : [...members.keys()];
+  if (selected.length > members.size) return res.status(400).json({ error: "Hay demasiados participantes seleccionados." });
   if (selected.some((id) => !members.has(id))) return res.status(400).json({ error: "Hay participantes que no pertenecen a la junta." });
 
   const itemInputs = Array.isArray(items) ? items : [];
@@ -202,6 +286,7 @@ router.post("/:id/expenses", requireEventMember, async (req, res) => {
         let ids = Array.isArray(item.participantIds) && item.participantIds.length
           ? [...new Set(item.participantIds.map(Number))]
           : selected;
+        if (ids.length > members.size) return res.status(400).json({ error: "Hay demasiados participantes en un producto." });
         if (ids.some((id) => !members.has(id))) {
           return res.status(400).json({ error: "Un producto incluye participantes fuera de la junta." });
         }

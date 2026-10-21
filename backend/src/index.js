@@ -4,11 +4,13 @@ const authRouter = require("./routes/auth");
 const eventsRouter = require("./routes/events");
 const uploadRouter = require("./routes/upload");
 
-if (process.env.NODE_ENV === "production" && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
-  throw new Error("JWT_SECRET must contain at least 32 characters in production.");
+if (process.env.NODE_ENV === "production" &&
+    (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32 || !process.env.FRONTEND_URL)) {
+  throw new Error("JWT_SECRET and FRONTEND_URL must be configured for production.");
 }
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(cors({
   origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map((url) => url.trim()) : true,
 }));
