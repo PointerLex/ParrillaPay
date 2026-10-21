@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import HomeDashboard from "../components/HomeDashboard";
 
 export default function Home() {
-  redirect("/event/1");
+  return <HomeDashboard />;
 }
