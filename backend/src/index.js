@@ -12,7 +12,7 @@ if (process.env.NODE_ENV === "production" &&
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors({
-  origin: process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map((url) => url.trim()) : true,
+  origin: (process.env.FRONTEND_URL || "http://localhost:3000").split(",").map((url) => url.trim()),
 }));
 app.use(express.json({ limit: "100kb" }));
 

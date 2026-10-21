@@ -1,36 +1,44 @@
 const express = require("express");
+const { rateLimit } = require("express-rate-limit");
 const prisma = require("../db");
 const { authenticate, hashPassword, signToken, verifyPassword } = require("../auth");
 
 const router = express.Router();
-const authAttempts = new Map();
-const attemptWindowMs = 15 * 60 * 1000;
-let requestsSinceCleanup = 0;
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Demasiados intentos. Vuelve a probar más tarde." },
+});
 
-function limitAuthAttempts(req, res, next) {
-  const now = Date.now();
-  const current = authAttempts.get(req.ip);
-  if (current && current.expiresAt > now && current.count >= 30) {
-    res.set("Retry-After", Math.ceil((current.expiresAt - now) / 1000));
-    return res.status(429).json({ error: "Demasiados intentos. Vuelve a probar más tarde." });
+function isValidEmail(email) {
+  if (email.length > 254) return false;
+  const separator = email.indexOf("@");
+  if (separator < 1 || separator !== email.lastIndexOf("@") || separator > 64) return false;
+  const local = email.slice(0, separator);
+  const domain = email.slice(separator + 1);
+  if (local.startsWith(".") || local.endsWith(".") || local.includes("..")) return false;
+  for (const character of email) {
+    if (character.trim() === "") return false;
   }
-  authAttempts.set(req.ip, current && current.expiresAt > now
-    ? { count: current.count + 1, expiresAt: current.expiresAt }
-    : { count: 1, expiresAt: now + attemptWindowMs });
-  if (++requestsSinceCleanup % 128 === 0) {
-    for (const [ip, attempt] of authAttempts) {
-      if (attempt.expiresAt <= now) authAttempts.delete(ip);
-    }
-  }
-  next();
+  const labels = domain.split(".");
+  if (labels.length < 2) return false;
+  return labels.every((label) =>
+    label.length > 0 && label.length <= 63 &&
+    !label.startsWith("-") && !label.endsWith("-") &&
+    [...label].every((character) =>
+      (character >= "a" && character <= "z") ||
+      (character >= "0" && character <= "9") ||
+      character === "-"));
 }
 
-router.post("/register", limitAuthAttempts, async (req, res) => {
+router.post("/register", authLimiter, async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
   const taxId = typeof req.body?.taxId === "string" ? req.body.taxId.trim() : "";
   const password = req.body?.password;
-  if (!name || name.length > 80 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+  if (!name || name.length > 80 || !isValidEmail(email) ||
       taxId.length > 20 || typeof password !== "string" || password.length < 10 || password.length > 128) {
     return res.status(400).json({ error: "Ingresa nombre, correo válido y contraseña de al menos 10 caracteres." });
   }
@@ -42,7 +50,7 @@ router.post("/register", limitAuthAttempts, async (req, res) => {
   res.status(201).json({ token: signToken(user.id), user: { id: user.id, name: user.name, email: user.email } });
 });
 
-router.post("/login", limitAuthAttempts, async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
   const password = req.body?.password;
   if (!email || typeof password !== "string") {
